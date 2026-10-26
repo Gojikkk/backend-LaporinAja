@@ -52,8 +52,22 @@ model User {
   changedStatusHistories ReportStatusHistory[] @relation("HistoryChangedBy")
   followUps             ReportFollowUp[]       @relation("FollowUpCreatedBy")
   uploadedEvidences     ReportEvidence[]       @relation("EvidenceUploadedBy")
+  sessions              Session[]
 
   @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  tokenHash String   @unique @map("token_hash") @db.VarChar(64)
+  csrfHash  String   @map("csrf_hash") @db.VarChar(64)
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("sessions")
 }
 
 model ReportCategory {
@@ -124,6 +138,7 @@ model ReportFollowUp {
   createdBy         String           @map("created_by") @db.Uuid
   note              String           @db.Text
   isResolutionNote  Boolean          @default(false) @map("is_resolution_note")
+  resolutionExplanation String?      @map("resolution_explanation") @db.VarChar(500)
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   report            Report           @relation(fields: [reportId], references: [id])
   user              User             @relation("FollowUpCreatedBy", fields: [createdBy], references: [id])

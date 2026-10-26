@@ -1,5 +1,7 @@
 node_modules/
 dist/
+uploads/
+test-uploads/
 .env
 .env.*
 !.env.example
