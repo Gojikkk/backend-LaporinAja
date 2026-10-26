@@ -26,8 +26,16 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-laporinaja}:${POSTGRES_PASSWORD:-laporinaja_dev}@db:5432/${POSTGRES_DB:-laporinaja}?schema=public
       PORT: 3000
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173}
+      SESSION_SECRET: ${SESSION_SECRET:-local-demo-session-secret-change-before-deploy}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-7}
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_REQUEST_BYTES: ${MAX_UPLOAD_REQUEST_BYTES:-20971520}
     ports:
       - "${PORT:-3000}:3000"
+    volumes:
+      - uploaded_files:/app/uploads
     healthcheck:
       test:
         [
@@ -43,3 +51,4 @@ services:
 
 volumes:
   postgres_data:
+  uploaded_files:
