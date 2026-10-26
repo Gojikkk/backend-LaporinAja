@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  PELAPOR
+  ADMIN
+
+  @@map("user_role")
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+
+  @@map("account_status")
+}
+
+enum ReportStatus {
+  SUBMITTED
+  VERIFIED
+  IN_PROGRESS
+  RESOLVED
+  REJECTED
+  DUPLICATE
+
+  @@map("report_status")
+}
+
+enum EvidenceKind {
+  REPORT_PHOTO
+  RESOLUTION_PROOF
+
+  @@map("evidence_kind")
+}
+
+model User {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  name                  String                 @db.VarChar(100)
+  email                 String                 @unique @db.VarChar(255)
+  passwordHash          String                 @map("password_hash") @db.VarChar(255)
+  role                  UserRole               @default(PELAPOR)
+  accountStatus         AccountStatus          @default(ACTIVE) @map("account_status")
+  createdAt             DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime               @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt             DateTime?              @map("deleted_at") @db.Timestamptz(6)
+  reports               Report[]               @relation("ReportReporter")
+  changedStatusHistories ReportStatusHistory[] @relation("HistoryChangedBy")
+  followUps             ReportFollowUp[]       @relation("FollowUpCreatedBy")
+  uploadedEvidences     ReportEvidence[]       @relation("EvidenceUploadedBy")
+
+  @@map("users")
+}
+
+model ReportCategory {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique @db.VarChar(60)
+  slug      String   @unique @db.VarChar(60)
+  isActive  Boolean  @default(true) @map("is_active")
+  reports   Report[]
+
+  @@map("report_categories")
+}
+
+model Report {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  publicCode            String                 @unique @map("public_code") @db.VarChar(20)
+  reporterId            String                 @map("reporter_id") @db.Uuid
+  categoryId            Int                    @map("category_id")
+  title                 String                 @db.VarChar(100)
+  description           String                 @db.Text
+  city                  String                 @db.VarChar(100)
+  district              String                 @db.VarChar(100)
+  village               String                 @db.VarChar(100)
+  locationDetail        String                 @map("location_detail") @db.VarChar(200)
+  latitude              Decimal?               @db.Decimal(9, 6)
+  longitude             Decimal?               @db.Decimal(9, 6)
+  status                ReportStatus           @default(SUBMITTED)
+  duplicateOfReportId   String?                @map("duplicate_of_report_id") @db.Uuid
+  submissionKey         String?                @map("submission_key") @db.VarChar(64)
+  isHidden              Boolean                @default(false) @map("is_hidden")
+  createdAt             DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime               @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  verifiedAt            DateTime?              @map("verified_at") @db.Timestamptz(6)
+  resolvedAt            DateTime?              @map("resolved_at") @db.Timestamptz(6)
+  reporter              User                   @relation("ReportReporter", fields: [reporterId], references: [id])
+  category              ReportCategory         @relation(fields: [categoryId], references: [id])
+  duplicateOf           Report?                @relation("ReportDuplicates", fields: [duplicateOfReportId], references: [id], onDelete: Restrict)
+  duplicates            Report[]               @relation("ReportDuplicates")
+  statusHistories       ReportStatusHistory[]
+  followUps             ReportFollowUp[]
+  evidences             ReportEvidence[]
+
+  @@unique([reporterId, submissionKey])
+  @@index([status, createdAt(sort: Desc)])
+  @@index([reporterId, createdAt(sort: Desc)])
+  @@index([categoryId, status])
+  @@index([district, village])
+  @@map("reports")
+}
+
+model ReportStatusHistory {
+  id        String       @id @default(uuid()) @db.Uuid
+  reportId  String       @map("report_id") @db.Uuid
+  fromStatus ReportStatus? @map("from_status")
+  toStatus  ReportStatus @map("to_status")
+  changedBy String       @map("changed_by") @db.Uuid
+  reason    String?      @db.Text
+  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  report    Report       @relation(fields: [reportId], references: [id])
+  user      User         @relation("HistoryChangedBy", fields: [changedBy], references: [id])
+
+  @@index([reportId, createdAt])
+  @@map("report_status_histories")
+}
+
+model ReportFollowUp {
+  id                String           @id @default(uuid()) @db.Uuid
+  reportId          String           @map("report_id") @db.Uuid
+  createdBy         String           @map("created_by") @db.Uuid
+  note              String           @db.Text
+  isResolutionNote  Boolean          @default(false) @map("is_resolution_note")
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  report            Report           @relation(fields: [reportId], references: [id])
+  user              User             @relation("FollowUpCreatedBy", fields: [createdBy], references: [id])
+  evidences         ReportEvidence[]
+
+  @@index([reportId, createdAt])
+  @@map("report_follow_ups")
+}
+
+model ReportEvidence {
+  id          String          @id @default(uuid()) @db.Uuid
+  reportId    String          @map("report_id") @db.Uuid
+  followUpId  String?         @map("follow_up_id") @db.Uuid
+  uploadedBy  String          @map("uploaded_by") @db.Uuid
+  kind        EvidenceKind
+  storageKey  String          @map("storage_key") @db.VarChar(255)
+  mimeType    String          @map("mime_type") @db.VarChar(50)
+  sizeBytes   Int             @map("size_bytes")
+  altText     String?         @map("alt_text") @db.VarChar(255)
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  report      Report          @relation(fields: [reportId], references: [id])
+  followUp    ReportFollowUp? @relation(fields: [followUpId], references: [id], onDelete: Restrict)
+  user        User            @relation("EvidenceUploadedBy", fields: [uploadedBy], references: [id])
+
+  @@index([reportId, createdAt])
+  @@map("report_evidences")
+}
