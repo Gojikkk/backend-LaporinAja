@@ -53,7 +53,8 @@ The initial migration creates the six core entities, enums, relationships, uniqu
 - Success responses use `{ "data": ... }`. Lists use `{ "data": [], "meta": { "page": 1, "limit": 12, "total": 0 } }`; private list responses also include `counts` keyed by every report status.
 - Errors use `{ "error": { "code": "...", "message": "...", "fields": {} } }` with Indonesian messages and no stack traces.
 - Available endpoint groups: `/api/auth`, `/api/categories`, `/api/reports`, `/api/me/reports`, `/api/admin/reports`, `/api/stats/public`, and `/api/admin/stats`.
-- Browser mutations require an exact allowed `Origin`; authenticated mutations also require the `laporinaja_csrf` cookie value in the `X-CSRF-Token` header. The session token stays in an HttpOnly cookie.
+- Browser mutations require an exact allowed `Origin`; authenticated mutations also require the `laporinaja_csrf` cookie value in the `X-CSRF-Token` header. The signed JWT session token stays in an HttpOnly cookie and must match an active database session, so logout revokes it immediately.
+- Google sign-in uses `POST /api/auth/google` with `{ "credential": "<Google ID token>" }`. Set `GOOGLE_CLIENT_ID` to the OAuth 2.0 Web client ID used by Google Identity Services; the backend verifies the token audience and verified email before creating a `PELAPOR` account or session.
 - React must send credentialed requests (`credentials: "include"` or `withCredentials: true`). For multipart requests, let the browser generate the `Content-Type` boundary.
 - Report images are checked against decoded image content and MIME, re-encoded with Sharp to remove metadata, and stored under a random key. Local/demo deployments use the `uploaded_files` Docker volume; non-Docker local runs use `UPLOAD_DIR`.
 

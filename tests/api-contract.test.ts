@@ -4,12 +4,14 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import sharp from "sharp";
+import jwt from "jsonwebtoken";
 import { mediaUrl } from "../src/utils/media-signature";
 
 const mocks = vi.hoisted(() => {
   const fn = () => vi.fn();
   const model = (methods: string[]) => Object.fromEntries(methods.map((method) => [method, fn()]));
   return {
+    googleClient: { verifyIdToken: vi.fn() },
     prisma: {
       session: model(["create", "findUnique", "deleteMany"]),
       user: model(["create", "findUnique", "update"]),
@@ -32,6 +34,11 @@ vi.mock("argon2", () => ({
     verify: vi.fn().mockResolvedValue(true)
   }
 }));
+vi.mock("google-auth-library", () => ({
+  OAuth2Client: vi.fn().mockImplementation(function OAuth2Client() {
+    return mocks.googleClient;
+  })
+}));
 
 import app from "../src/app";
 
@@ -50,11 +57,16 @@ const user = {
 function sessionCookie(role: string = "PELAPOR"): string {
   mocks.prisma.session.findUnique.mockResolvedValue({
     id: "session-id",
+    userId: user.id,
     expiresAt: new Date(Date.now() + 60_000),
     csrfHash,
     user: { ...user, role }
   });
-  return "laporinaja_session=session-token; laporinaja_csrf=" + csrfToken;
+  const token = jwt.sign({ sub: user.id, jti: "test-session" }, process.env.SESSION_SECRET!, {
+    algorithm: "HS256",
+    expiresIn: "1h"
+  });
+  return "laporinaja_session=" + token + "; laporinaja_csrf=" + csrfToken;
 }
 
 function mutationHeaders(role?: string) {
@@ -219,6 +231,31 @@ describe("API contract transport and authentication", () => {
       /Expires=Thu, 01 Jan 1970/i.test(cookie))).toBe(true);
   });
 
+  it("verifies a Google ID token before creating a session", async () => {
+    mocks.googleClient.verifyIdToken.mockResolvedValue({
+      getPayload: () => ({
+        email: "rani@example.test",
+        email_verified: true,
+        name: "Rani"
+      })
+    });
+    mocks.prisma.user.findUnique.mockResolvedValue(user);
+    mocks.prisma.session.create.mockResolvedValue({});
+
+    const response = await request(app)
+      .post("/api/auth/google")
+      .set("Origin", frontend)
+      .send({ credential: "google-id-token" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({ id: user.id, name: user.name, role: user.role });
+    expect(mocks.googleClient.verifyIdToken).toHaveBeenCalledWith({
+      idToken: "google-id-token",
+      audience: "test-google-client-id.apps.googleusercontent.com"
+    });
+    expect(mocks.prisma.session.create).toHaveBeenCalled();
+  });
+
   it("returns 401 without a session and 403 for a role mismatch", async () => {
     mocks.prisma.session.findUnique.mockResolvedValue(null);
     const unauthorized = await request(app).get("/api/me/reports").set("Origin", frontend);
@@ -232,8 +269,10 @@ describe("API contract transport and authentication", () => {
   });
 
   it("rejects suspended sessions on every protected request", async () => {
+    const cookie = sessionCookie();
     mocks.prisma.session.findUnique.mockResolvedValue({
       id: "session-id",
+      userId: user.id,
       expiresAt: new Date(Date.now() + 60_000),
       csrfHash,
       user: { ...user, accountStatus: "SUSPENDED" }
@@ -241,7 +280,7 @@ describe("API contract transport and authentication", () => {
     const response = await request(app)
       .get("/api/auth/me")
       .set("Origin", frontend)
-      .set("Cookie", "laporinaja_session=session-token");
+      .set("Cookie", cookie);
     expect(response.status).toBe(403);
     expect(response.body.error.code).toBe("ACCOUNT_FORBIDDEN");
   });
