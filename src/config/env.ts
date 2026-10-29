@@ -21,6 +21,7 @@ export const env = {
     .map((origin) => origin.trim())
     .filter(Boolean),
   sessionSecret,
+  googleClientId: process.env.GOOGLE_CLIENT_ID,
   sessionCookieSecure: process.env.SESSION_COOKIE_SECURE === "true",
   sessionTtlDays,
   uploadDir: process.env.UPLOAD_DIR ?? "uploads",
