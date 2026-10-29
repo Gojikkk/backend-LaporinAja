@@ -1,5 +1,6 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { RequestHandler, Response } from "express";
+import jwt from "jsonwebtoken";
 import { env } from "../config/env";
 import { prisma } from "../db";
 import { HttpError } from "../utils/http-error";
@@ -38,8 +39,20 @@ function sessionCookieOptions(maxAge: number) {
   };
 }
 
+function verifySessionToken(token: string): string | undefined {
+  try {
+    const payload = jwt.verify(token, env.sessionSecret, { algorithms: ["HS256"] });
+    return typeof payload === "object" && typeof payload.sub === "string" ? payload.sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function createSession(userId: string): Promise<{ token: string; csrf: string }> {
-  const token = randomBytes(32).toString("base64url");
+  const token = jwt.sign({ sub: userId, jti: randomUUID() }, env.sessionSecret, {
+    algorithm: "HS256",
+    expiresIn: sessionLifetimeMs / 1000
+  });
   const csrf = randomBytes(32).toString("base64url");
   await prisma.session.create({
     data: {
@@ -84,12 +97,14 @@ export const requireAuth: RequestHandler = async (request, _response, next) => {
   try {
     const token = readCookie(request, SESSION_COOKIE);
     if (!token) throw new HttpError(401, "UNAUTHENTICATED", "Silakan masuk terlebih dahulu");
+    const tokenUserId = verifySessionToken(token);
+    if (!tokenUserId) throw new HttpError(401, "UNAUTHENTICATED", "Silakan masuk terlebih dahulu");
 
     const session = await prisma.session.findUnique({
       where: { tokenHash: hash(token) },
       include: { user: true }
     });
-    if (!session || session.expiresAt <= new Date()) {
+    if (!session || session.userId !== tokenUserId || session.expiresAt <= new Date()) {
       throw new HttpError(401, "UNAUTHENTICATED", "Silakan masuk terlebih dahulu");
     }
     if (session.user.accountStatus !== "ACTIVE" || session.user.deletedAt) {
@@ -114,11 +129,13 @@ export const optionalAuth: RequestHandler = async (request, _response, next) => 
   try {
     const token = readCookie(request, SESSION_COOKIE);
     if (!token) return next();
+    const tokenUserId = verifySessionToken(token);
+    if (!tokenUserId) return next();
     const session = await prisma.session.findUnique({
       where: { tokenHash: hash(token) },
       include: { user: true }
     });
-    if (session && session.expiresAt > new Date() &&
+    if (session && session.userId === tokenUserId && session.expiresAt > new Date() &&
         session.user.accountStatus === "ACTIVE" && !session.user.deletedAt) {
       request.user = {
         id: session.user.id,
