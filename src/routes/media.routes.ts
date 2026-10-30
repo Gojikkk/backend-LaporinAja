@@ -4,7 +4,7 @@ import { prisma } from "../db";
 import { optionalAuth } from "../middlewares/auth";
 import { HttpError } from "../utils/http-error";
 import { validMediaSignature } from "../utils/media-signature";
-import { imagePath } from "../utils/uploads";
+import { imageUrl } from "../utils/uploads";
 import { ReportStatus } from "@prisma/client";
 
 const mediaRoutes = Router();
@@ -36,11 +36,24 @@ mediaRoutes.get("/media/:id", optionalAuth, async (request, response, next) => {
     throw new HttpError(404, "NOT_FOUND", "File tidak ditemukan");
   }
 
+  let upstream: Response;
+  try {
+    upstream = await fetch(imageUrl(evidence.storageKey), {
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch {
+    next(new HttpError(502, "MEDIA_UNAVAILABLE", "Gambar tidak dapat dimuat"));
+    return;
+  }
+  if (!upstream.ok || !upstream.body) {
+    next(new HttpError(404, "NOT_FOUND", "File tidak ditemukan"));
+    return;
+  }
+
+  const image = Buffer.from(await upstream.arrayBuffer());
   response.type(evidence.mimeType);
   response.setHeader("Cache-Control", "private, max-age=60");
-  response.sendFile(imagePath(evidence.storageKey), (error) => {
-    if (error && !response.headersSent) next(new HttpError(404, "NOT_FOUND", "File tidak ditemukan"));
-  });
+  response.send(image);
 });
 
 export default mediaRoutes;

@@ -11,7 +11,7 @@ COPY prisma ./prisma
 COPY prisma.config.ts tsconfig.json ./
 COPY src ./src
 
-RUN npm run prisma:generate && npm run build && mkdir -p /app/uploads
+RUN npm run prisma:generate && npm run build
 
 EXPOSE 3000
 
