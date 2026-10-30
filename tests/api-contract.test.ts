@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import sharp from "sharp";
@@ -12,6 +10,11 @@ const mocks = vi.hoisted(() => {
   const model = (methods: string[]) => Object.fromEntries(methods.map((method) => [method, fn()]));
   return {
     googleClient: { verifyIdToken: vi.fn() },
+    cloudinary: {
+      config: vi.fn(),
+      uploader: { upload_stream: vi.fn(), destroy: vi.fn() },
+      url: vi.fn()
+    },
     prisma: {
       session: model(["create", "findUnique", "deleteMany"]),
       user: model(["create", "findUnique", "update"]),
@@ -28,6 +31,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("../src/db", () => ({ prisma: mocks.prisma }));
+vi.mock("cloudinary", () => ({ v2: mocks.cloudinary }));
 vi.mock("argon2", () => ({
   default: {
     hash: vi.fn().mockResolvedValue("argon2-hash"),
@@ -99,6 +103,21 @@ const reportData = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.cloudinary.uploader.upload_stream.mockImplementation((options, callback) => ({
+    end: (buffer: Buffer) => {
+      const publicId = `${options.folder}/${options.public_id}`;
+      callback(undefined, {
+        public_id: publicId,
+        secure_url: `https://res.cloudinary.com/test-cloud/image/authenticated/${publicId}`,
+        format: "png",
+        bytes: buffer.length
+      });
+    }
+  }));
+  mocks.cloudinary.url.mockImplementation(
+    (key: string) => `https://res.cloudinary.com/test-cloud/image/authenticated/${key}`
+  );
+  mocks.cloudinary.uploader.destroy.mockResolvedValue({ result: "ok" });
   mocks.prisma.$transaction.mockImplementation(async (operations: unknown) => {
     if (typeof operations === "function") {
       return (operations as (tx: typeof mocks.prisma) => unknown)(mocks.prisma);
@@ -108,9 +127,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(async () => {
-  const { rm } = await import("node:fs/promises");
-  await rm("test-uploads", { recursive: true, force: true });
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("API contract transport and authentication", () => {
@@ -325,12 +343,13 @@ describe("report and privacy contract", () => {
 
   it("serves signed evidence only when the report is public or the viewer is authorized", async () => {
     const id = "223c0918-5f83-4a78-88da-110d04478f44";
-    const key = "signed-photo.png";
+    const key = "laporinaja/signed-photo";
     const image = await sharp({
       create: { width: 2, height: 2, channels: 3, background: "#ffffff" }
     }).png().toBuffer();
-    await mkdir("test-uploads", { recursive: true });
-    await writeFile(path.join("test-uploads", key), image);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(image, { status: 200, headers: { "content-type": "image/png" } })
+    ));
     const signedUrl = mediaUrl(id);
     mocks.prisma.reportEvidence.findUnique.mockResolvedValue({
       id,
@@ -351,6 +370,10 @@ describe("report and privacy contract", () => {
     const publicFile = await request(app).get(signedUrl).set("Origin", frontend);
     expect(publicFile.status).toBe(200);
     expect(publicFile.headers["content-type"]).toContain("image/png");
+    expect(mocks.cloudinary.url).toHaveBeenCalledWith(key, expect.objectContaining({
+      type: "authenticated",
+      sign_url: true
+    }));
   });
 
   it("enforces expectedStatus conflicts and invalid transitions", async () => {
@@ -434,6 +457,10 @@ describe("report and privacy contract", () => {
       })
     }));
     expect(mocks.prisma.reportEvidence.createMany).toHaveBeenCalled();
+    expect(mocks.cloudinary.uploader.upload_stream).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "authenticated", folder: "laporinaja-test" }),
+      expect.any(Function)
+    );
     expect(mocks.prisma.$transaction).toHaveBeenCalled();
   });
 
@@ -598,5 +625,167 @@ describe("report and privacy contract", () => {
     const limited = responses.find((response) => response.status === 429);
     expect(limited).toBeDefined();
     expect(limited?.body.error.code).toBe("RATE_LIMITED");
+  });
+});
+
+describe("public report catalog (LAP-9)", () => {
+  it("TC-12 lists only public, non-hidden reports with filters and capped pagination", async () => {
+    mocks.prisma.report.count.mockResolvedValue(1);
+    mocks.prisma.report.findMany.mockResolvedValue([reportData]);
+
+    const response = await request(app)
+      .get("/api/reports?category=lampu-jalan&status=VERIFIED&district=Kecamatan&village=Kelurahan&page=2")
+      .set("Origin", frontend);
+
+    expect(response.status).toBe(200);
+    expect(response.body.meta).toEqual({ page: 2, limit: 12, total: 1 });
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.data[0]).toMatchObject({
+      code: reportData.publicCode,
+      title: reportData.title,
+      status: reportData.status,
+      category: { slug: "lampu-jalan" },
+      thumbnailUrl: null
+    });
+    expect(JSON.stringify(response.body)).not.toContain(user.id);
+    expect(mocks.prisma.report.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        isHidden: false,
+        status: { in: ["VERIFIED"] },
+        category: { slug: "lampu-jalan" },
+        district: "Kecamatan",
+        village: "Kelurahan"
+      },
+      orderBy: { createdAt: "desc" },
+      skip: 12,
+      take: 12
+    }));
+
+    mocks.prisma.report.findMany.mockClear();
+    const capped = await request(app).get("/api/reports?limit=50").set("Origin", frontend);
+    expect(capped.status).toBe(200);
+    expect(mocks.prisma.report.findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 0, take: 50 }));
+
+    const tooLarge = await request(app).get("/api/reports?limit=51").set("Origin", frontend);
+    expect(tooLarge.status).toBe(400);
+    expect(tooLarge.body.error.code).toBe("BAD_REQUEST");
+  });
+
+  it("TC-12 rejects non-public status filters so private reports never leak into the list", async () => {
+    for (const status of ["SUBMITTED", "REJECTED"]) {
+      const response = await request(app)
+        .get(`/api/reports?status=${status}`)
+        .set("Origin", frontend);
+      expect(response.status).toBe(400);
+      expect(response.body.error.code).toBe("BAD_REQUEST");
+    }
+    expect(mocks.prisma.report.findMany).not.toHaveBeenCalled();
+  });
+
+  it("TC-20 returns timeline, notes, and signed evidence without reporter or individual admin identity", async () => {
+    const photoId = "223c0918-5f83-4a78-88da-110d04478f44";
+    const proofId = "7f3e2cee-c90c-4a54-b12a-5a9c65a13590";
+    const changedAt = new Date("2026-10-26T00:00:00.000Z");
+    const adminId = "8a8f4e1a-3d64-4c3b-9f8e-6f6d7c8b9a01";
+    mocks.prisma.report.findFirst.mockResolvedValue({
+      ...reportData,
+      status: "RESOLVED",
+      reporter: { name: "Rani", email: "private@example.test" },
+      evidences: [
+        { id: photoId, kind: "REPORT_PHOTO", mimeType: "image/png", altText: null, createdAt: changedAt },
+        { id: proofId, kind: "RESOLUTION_PROOF", mimeType: "image/png", altText: "Bukti", createdAt: changedAt }
+      ],
+      statusHistories: [
+        { fromStatus: null, toStatus: "SUBMITTED", changedBy: user.id, reason: null, createdAt: changedAt },
+        { fromStatus: "SUBMITTED", toStatus: "REJECTED", changedBy: adminId, reason: "private rejection", createdAt: changedAt },
+        { fromStatus: "REJECTED", toStatus: "SUBMITTED", changedBy: adminId, reason: "private correction", createdAt: changedAt },
+        { fromStatus: "SUBMITTED", toStatus: "VERIFIED", changedBy: adminId, reason: null, createdAt: changedAt },
+        { fromStatus: "VERIFIED", toStatus: "IN_PROGRESS", changedBy: adminId, reason: null, createdAt: changedAt },
+        { fromStatus: "IN_PROGRESS", toStatus: "RESOLVED", changedBy: adminId, reason: null, createdAt: changedAt }
+      ],
+      followUps: [{
+        note: "Perbaikan telah selesai dilakukan",
+        isResolutionNote: true,
+        resolutionExplanation: "Petugas mengganti lampu dan menguji nyala kembali.",
+        createdAt: changedAt,
+        evidences: [{ id: proofId, kind: "RESOLUTION_PROOF", mimeType: "image/png", altText: "Bukti" }]
+      }]
+    });
+
+    const response = await request(app)
+      .get("/api/reports/LPR-2026-000001")
+      .set("Origin", frontend);
+
+    expect(response.status).toBe(200);
+    expect(mocks.prisma.report.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        publicCode: "LPR-2026-000001",
+        isHidden: false,
+        status: { in: ["VERIFIED", "IN_PROGRESS", "RESOLVED", "DUPLICATE"] }
+      }
+    }));
+    expect(response.body.data.timeline).toHaveLength(4);
+    expect(response.body.data.timeline.every((entry: { actorLabel: string }) =>
+      entry.actorLabel === "Administrator platform")).toBe(true);
+    expect(response.body.data.followUps).toEqual([{
+      note: "Perbaikan telah selesai dilakukan",
+      isResolutionNote: true,
+      resolutionExplanation: "Petugas mengganti lampu dan menguji nyala kembali.",
+      createdAt: changedAt.toISOString()
+    }]);
+    expect(response.body.data.photos).toEqual([{
+      url: expect.stringMatching(/^\/api\/media\/[0-9a-f-]+\?expires=\d+&signature=[a-f0-9]{64}$/),
+      mimeType: "image/png"
+    }]);
+    expect(response.body.data.evidences).toHaveLength(1);
+    expect(response.body.data.evidences[0].url).toMatch(/^\/api\/media\/[0-9a-f-]+\?expires=\d+&signature=[a-f0-9]{64}$/);
+
+    const payload = JSON.stringify(response.body);
+    expect(payload).not.toContain(user.id);
+    expect(payload).not.toContain(adminId);
+    expect(payload).not.toContain("private@example.test");
+    expect(payload).not.toContain("private rejection");
+    expect(payload).not.toContain("private correction");
+  });
+
+  it("TC-26 returns the same 404 for unknown, malformed, and non-public report codes", async () => {
+    mocks.prisma.report.findFirst.mockResolvedValue(null);
+    const requests = await Promise.all([
+      request(app).get("/api/reports/LPR-2026-000099").set("Origin", frontend),
+      request(app).get("/api/reports/LPR-2026-000001").set("Origin", frontend),
+      request(app).get("/api/reports/not-a-code").set("Origin", frontend)
+    ]);
+
+    for (const response of requests) {
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({
+        error: { code: "NOT_FOUND", message: "Laporan tidak ditemukan" }
+      });
+    }
+    expect(mocks.prisma.report.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        publicCode: "LPR-2026-000001",
+        isHidden: false,
+        status: { in: ["VERIFIED", "IN_PROGRESS", "RESOLVED", "DUPLICATE"] }
+      }
+    }));
+  });
+
+  it("TC-28 serves only active categories in a stable order", async () => {
+    const categories = [
+      { id: 1, name: "Jalan rusak", slug: "jalan-rusak" },
+      { id: 2, name: "Lampu jalan", slug: "lampu-jalan" }
+    ];
+    mocks.prisma.reportCategory.findMany.mockResolvedValue(categories);
+
+    const response = await request(app).get("/api/categories").set("Origin", frontend);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: categories });
+    expect(mocks.prisma.reportCategory.findMany).toHaveBeenCalledWith({
+      where: { isActive: true },
+      select: { id: true, name: true, slug: true },
+      orderBy: { id: "asc" }
+    });
   });
 });
